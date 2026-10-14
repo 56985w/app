@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:fl_chart/fl_chart.dart';
+import 'package:intl/intl.dart';
 
 void main() {
   runApp(const MyApp());
@@ -12,10 +14,10 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '记账本',
+      title: '记帐',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.green),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
         useMaterial3: true,
       ),
       home: const HomePage(),
@@ -60,25 +62,33 @@ class Tx {
 }
 
 class Store {
-  static const String _key = 'transactions_v1';
+  static const String _keyTx = 'transactions_v1';
+  static const String _keyBudget = 'monthly_budget';
 
-  static Future<List<Tx>> load() async {
+  static Future<List<Tx>> loadTx() async {
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_key);
+    final raw = prefs.getString(_keyTx);
     if (raw == null || raw.isEmpty) return [];
-
     final data = jsonDecode(raw) as List<dynamic>;
-    return data
-        .map((e) => Tx.fromJson(e as Map<String, dynamic>))
-        .toList();
+    return data.map((e) => Tx.fromJson(e as Map<String, dynamic>)).toList();
   }
 
-  static Future<void> save(List<Tx> list) async {
+  static Future<void> saveTx(List<Tx> list) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
-      _key,
+      _keyTx,
       jsonEncode(list.map((e) => e.toJson()).toList()),
     );
+  }
+
+  static Future<double> loadBudget() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getDouble(_keyBudget) ?? 0.0;
+  }
+
+  static Future<void> saveBudget(double budget) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_keyBudget, budget);
   }
 }
 
@@ -92,6 +102,8 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   List<Tx> _txs = [];
   bool _loading = true;
+  double _budget = 0.0;
+  String _timeFilter = '全部'; // '全部', '一年', '一月'
 
   @override
   void initState() {
@@ -100,22 +112,57 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _load() async {
-    final list = await Store.load();
+    final list = await Store.loadTx();
+    final b = await Store.loadBudget();
     list.sort((a, b) => b.date.compareTo(a.date));
     if (!mounted) return;
     setState(() {
       _txs = list;
+      _budget = b;
       _loading = false;
     });
   }
 
+  // 获取当前过滤时间段内的数据
+  List<Tx> get _filteredTxs {
+    if (_timeFilter == '全部') return _txs;
+    final now = DateTime.now();
+    if (_timeFilter == '一年') {
+      final oneYearAgo = DateTime(now.year - 1, now.month, now.day);
+      return _txs.where((t) => t.date.isAfter(oneYearAgo)).toList();
+    } else if (_timeFilter == '一月') {
+      final oneMonthAgo = DateTime(now.year, now.month - 1, now.day);
+      return _txs.where((t) => t.date.isAfter(oneMonthAgo)).toList();
+    }
+    return _txs;
+  }
+
+  // 计算总收支
   double get _income =>
-      _txs.where((t) => t.isIncome).fold(0.0, (s, t) => s + t.amount);
+      _filteredTxs.where((t) => t.isIncome).fold(0.0, (s, t) => s + t.amount);
 
   double get _expense =>
-      _txs.where((t) => !t.isIncome).fold(0.0, (s, t) => s + t.amount);
+      _filteredTxs.where((t) => !t.isIncome).fold(0.0, (s, t) => s + t.amount);
 
   double get _balance => _income - _expense;
+
+  // 计算本月支出（用于预算判断）
+  double get _currentMonthExpense {
+    final now = DateTime.now();
+    final startOfMonth = DateTime(now.year, now.month, 1);
+    return _txs
+        .where((t) => !t.isIncome && t.date.isAfter(startOfMonth))
+        .fold(0.0, (s, t) => s + t.amount);
+  }
+
+  // 分类统计（用于图表）
+  Map<String, double> get _categoryStats {
+    final Map<String, double> stats = {};
+    for (var t in _filteredTxs.where((t) => !t.isIncome)) {
+      stats[t.category] = (stats[t.category] ?? 0) + t.amount;
+    }
+    return stats;
+  }
 
   Future<void> _openAdd() async {
     final changed = await Navigator.push<bool>(
@@ -125,6 +172,35 @@ class _HomePageState extends State<HomePage> {
     if (changed == true) _load();
   }
 
+  Future<void> _setBudget() async {
+    final controller = TextEditingController(text: _budget.toStringAsFixed(0));
+    final result = await showDialog<double>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('设置每月预算'),
+        content: TextField(
+          controller: controller,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(prefixText: '¥ ', labelText: '预算金额'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          FilledButton(
+            onPressed: () {
+              final val = double.tryParse(controller.text);
+              if (val != null) Navigator.pop(ctx, val);
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (result != null) {
+      await Store.saveBudget(result);
+      _load();
+    }
+  }
+
   Future<void> _delete(int index) async {
     final ok = await showDialog<bool>(
       context: context,
@@ -132,22 +208,15 @@ class _HomePageState extends State<HomePage> {
         title: const Text('删除记录'),
         content: const Text('确定删除这条记录吗？'),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('删除'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('删除')),
         ],
       ),
     );
-
     if (ok == true) {
       final list = [..._txs];
       list.removeAt(index);
-      await Store.save(list);
+      await Store.saveTx(list);
       _load();
     }
   }
@@ -155,25 +224,23 @@ class _HomePageState extends State<HomePage> {
   String _dateText(DateTime d) =>
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
-  Widget _sumItem(String label, double value, Color color) {
-    return Column(
-      children: [
-        Text(label, style: TextStyle(color: color)),
-        const SizedBox(height: 4),
-        Text(
-          '¥${value.toStringAsFixed(2)}',
-          style: TextStyle(color: color, fontWeight: FontWeight.bold),
-        ),
-      ],
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
+    // 判断预算是否超支
+    final bool isOverBudget = _budget > 0 && _currentMonthExpense > _budget;
+    final double budgetProgress = _budget > 0 ? (_currentMonthExpense / _budget).clamp(0.0, 1.0) : 0.0;
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('记账本'),
+        title: const Text('记帐'),
         centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.account_balance_wallet),
+            onPressed: _setBudget,
+            tooltip: '设置预算',
+          ),
+        ],
       ),
       floatingActionButton: FloatingActionButton(
         onPressed: _openAdd,
@@ -181,56 +248,41 @@ class _HomePageState extends State<HomePage> {
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : Column(
+          : ListView(
+              padding: const EdgeInsets.all(12),
               children: [
-                Container(
-                  width: double.infinity,
-                  margin: const EdgeInsets.all(12),
-                  padding: const EdgeInsets.all(18),
-                  decoration: BoxDecoration(
-                    color: Theme.of(context).colorScheme.primaryContainer,
-                    borderRadius: BorderRadius.circular(18),
-                  ),
-                  child: Column(
-                    children: [
-                      const Text('当前余额'),
-                      const SizedBox(height: 6),
-                      Text(
-                        '¥${_balance.toStringAsFixed(2)}',
-                        style: const TextStyle(
-                          fontSize: 32,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 14),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceAround,
-                        children: [
-                          _sumItem('收入', _income, Colors.green),
-                          _sumItem('支出', _expense, Colors.red),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-                Expanded(
-                  child: _txs.isEmpty
-                      ? const Center(child: Text('还没有记录，点右下角 + 添加'))
-                      : ListView.separated(
-                          itemCount: _txs.length,
-                          separatorBuilder: (_, __) => const Divider(height: 1),
-                          itemBuilder: (context, index) {
-                            final t = _txs[index];
-                            final color =
-                                t.isIncome ? Colors.green : Colors.red;
+                // 1. 余额与总收支卡片
+                _buildBalanceCard(),
+                const SizedBox(height: 12),
+                
+                // 2. 预算与提醒卡片
+                _buildBudgetCard(isOverBudget, budgetProgress),
+                const SizedBox(height: 12),
 
-                            return ListTile(
+                // 3. 图表统计卡片
+                _buildChartCard(),
+                const SizedBox(height: 12),
+
+                // 4. 账单列表
+                const Text('交易明细', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                const SizedBox(height: 8),
+                _txs.isEmpty
+                    ? const Center(child: Padding(
+                        padding: EdgeInsets.all(32.0),
+                        child: Text('暂无记录，点右下角 + 开始记账'),
+                      ))
+                    : Column(
+                        children: _filteredTxs.asMap().entries.map((entry) {
+                          final index = entry.key;
+                          final t = entry.value;
+                          final color = t.isIncome ? Colors.green : Colors.red;
+                          return Card(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            child: ListTile(
                               leading: CircleAvatar(
-                                backgroundColor: color.withAlpha(30),
+                                backgroundColor: color.withOpacity(0.1),
                                 child: Icon(
-                                  t.isIncome
-                                      ? Icons.arrow_downward
-                                      : Icons.arrow_upward,
+                                  t.isIncome ? Icons.arrow_downward : Icons.arrow_upward,
                                   color: color,
                                 ),
                               ),
@@ -246,13 +298,194 @@ class _HomePageState extends State<HomePage> {
                                   fontSize: 16,
                                 ),
                               ),
-                              onLongPress: () => _delete(index),
-                            );
-                          },
-                        ),
+                              onLongPress: () => _delete(_txs.indexOf(t)),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+              ],
+            ),
+    );
+  }
+
+  // 余额卡片 UI
+  Widget _buildBalanceCard() {
+    return Card(
+      elevation: 2,
+      color: Theme.of(context).colorScheme.primaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          children: [
+            const Text('当前结余', style: TextStyle(fontSize: 16)),
+            const SizedBox(height: 6),
+            Text(
+              '¥${_balance.toStringAsFixed(2)}',
+              style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                Column(children: [
+                  const Text('总收入', style: TextStyle(color: Colors.green)),
+                  const SizedBox(height: 4),
+                  Text('¥${_income.toStringAsFixed(2)}', style: const TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
+                ]),
+                Column(children: [
+                  const Text('总支出', style: TextStyle(color: Colors.red)),
+                  const SizedBox(height: 4),
+                  Text('¥${_expense.toStringAsFixed(2)}', style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
+                ]),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 预算卡片 UI
+  Widget _buildBudgetCard(bool isOver, double progress) {
+    if (_budget <= 0) {
+      return Card(
+        child: ListTile(
+          title: const Text('未设置月度预算'),
+          subtitle: const Text('点击设置，控制每月开销'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: _setBudget,
+        ),
+      );
+    }
+
+    return Card(
+      color: isOver ? Colors.red.withOpacity(0.1) : null,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text('本月预算: ¥${_budget.toStringAsFixed(0)}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                Text('已用: ¥${_currentMonthExpense.toStringAsFixed(2)}', 
+                  style: TextStyle(color: isOver ? Colors.red : Colors.grey[700], fontWeight: FontWeight.bold)),
+              ],
+            ),
+            const SizedBox(height: 10),
+            LinearProgressIndicator(
+              value: progress,
+              backgroundColor: Colors.grey[300],
+              color: isOver ? Colors.red : Colors.teal,
+              minHeight: 8,
+            ),
+            const SizedBox(height: 8),
+            if (isOver)
+              const Row(
+                children: [
+                  Icon(Icons.warning_amber_rounded, color: Colors.red, size: 18),
+                  SizedBox(width: 4),
+                  Text('警告：本月支出已超过预算！', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
+                ],
+              )
+            else
+              Text('剩余: ¥${(_budget - _currentMonthExpense).toStringAsFixed(2)}', style: const TextStyle(color: Colors.teal)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 图表统计卡片 UI
+  Widget _buildChartCard() {
+    final stats = _categoryStats;
+    if (stats.isEmpty) {
+      return const Card(
+        child: Padding(
+          padding: EdgeInsets.all(32),
+          child: Center(child: Text('暂无支出数据，无法生成图表')),
+        ),
+      );
+    }
+
+    // 准备饼图数据
+    final List<Color> colors = [
+      Colors.teal, Colors.blue, Colors.orange, Colors.purple, Colors.pink,
+      Colors.red, Colors.green, Colors.amber, Colors.indigo, Colors.cyan
+    ];
+    int colorIndex = 0;
+    final List<PieChartSectionData> sections = [];
+    stats.forEach((category, amount) {
+      sections.add(PieChartSectionData(
+        color: colors[colorIndex % colors.length],
+        value: amount,
+        title: '${(amount / _expense * 100).toStringAsFixed(1)}%',
+        radius: 50,
+        titleStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white),
+      ));
+      colorIndex++;
+    });
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('支出统计', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                // 时间切换
+                ToggleButtons(
+                  isSelected: [_timeFilter == '全部', _timeFilter == '一年', _timeFilter == '一月'],
+                  onPressed: (index) {
+                    setState(() {
+                      _timeFilter = ['全部', '一年', '一月'][index];
+                    });
+                  },
+                  borderRadius: BorderRadius.circular(8),
+                  constraints: const BoxConstraints(minHeight: 28, minWidth: 45),
+                  children: const [
+                    Text('全部', style: TextStyle(fontSize: 12)),
+                    Text('一年', style: TextStyle(fontSize: 12)),
+                    Text('一月', style: TextStyle(fontSize: 12)),
+                  ],
                 ),
               ],
             ),
+            const SizedBox(height: 16),
+            SizedBox(
+              height: 180,
+              child: PieChart(
+                PieChartData(
+                  sections: sections,
+                  sectionsSpace: 2,
+                  centerSpaceRadius: 40,
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            // 图例
+            Wrap(
+              spacing: 12,
+              runSpacing: 6,
+              children: stats.keys.toList().asMap().entries.map((entry) {
+                final color = colors[entry.key % colors.length];
+                return Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(width: 12, height: 12, color: color),
+                    const SizedBox(width: 4),
+                    Text(entry.value, style: const TextStyle(fontSize: 12)),
+                  ],
+                );
+              }).toList(),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -313,16 +546,13 @@ class _AddPageState extends State<AddPage> {
       date: _date,
     );
 
-    final list = await Store.load();
+    final list = await Store.loadTx();
     list.add(tx);
-    await Store.save(list);
+    await Store.saveTx(list);
 
     if (!mounted) return;
     Navigator.pop(context, true);
   }
-
-  String _dateText(DateTime d) =>
-      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
   @override
   Widget build(BuildContext context) {
@@ -394,7 +624,7 @@ class _AddPageState extends State<AddPage> {
           ListTile(
             contentPadding: EdgeInsets.zero,
             title: const Text('日期'),
-            subtitle: Text(_dateText(_date)),
+            subtitle: Text('${_date.year}-${_date.month.toString().padLeft(2, '0')}-${_date.day.toString().padLeft(2, '0')}'),
             trailing: const Icon(Icons.calendar_month),
             onTap: _pickDate,
             shape: RoundedRectangleBorder(
