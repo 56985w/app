@@ -1,0 +1,51 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Create Flutter project
+        run: flutter create --project-name accounting_app --org com.example --platforms android .
+
+      - name: Copy app files
+        run: |
+          cp templates/pubspec.yaml pubspec.yaml
+          cp templates/main.dart lib/main.dart
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Upload APK to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: 记账本 v1.0.${{ github.run_number }}
+          body: 自动构建的记账本 APK
+          files: build/app/outputs/flutter-apk/app-release.apk
