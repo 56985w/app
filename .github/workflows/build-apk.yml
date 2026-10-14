@@ -36,16 +36,30 @@ jobs:
           cp templates/pubspec.yaml pubspec.yaml
           cp templates/main.dart lib/main.dart
 
+      - name: Change App Name to 记帐
+        run: |
+          sed -i 's/android:label=".*"/android:label="记帐"/g' android/app/src/main/AndroidManifest.xml
+
       - name: Install dependencies
         run: flutter pub get
 
       - name: Build APK
-        run: flutter build apk --release
+        run: flutter build apk --release --obfuscate --split-debug-info=./debug-info
+
+      - name: Check APK Size
+        run: |
+          SIZE=$(stat -c%s build/app/outputs/flutter-apk/app-release.apk)
+          MAX_SIZE=$((50 * 1024 * 1024))
+          if [ $SIZE -gt $MAX_SIZE ]; then
+            echo "APK size exceeds 50MB"
+            exit 1
+          fi
+          echo "APK size is OK: $((SIZE / 1024 / 1024)) MB"
 
       - name: Upload APK to Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.${{ github.run_number }}
-          name: 记账本 v1.0.${{ github.run_number }}
+          name: 记帐 v1.0.${{ github.run_number }}
           body: 自动构建的记账本 APK
           files: build/app/outputs/flutter-apk/app-release.apk
